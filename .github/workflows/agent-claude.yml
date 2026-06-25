@@ -15,8 +15,8 @@ on:
 jobs:
   claude-worker:
     if: |
-      github.event.label.name == 'agent:claude' ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && github.event.label.name == 'agent:claude')
     runs-on: ubuntu-latest
     permissions:
       issues: write

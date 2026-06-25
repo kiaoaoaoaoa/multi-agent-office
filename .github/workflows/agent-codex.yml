@@ -12,8 +12,8 @@ on:
 jobs:
   codex-worker:
     if: |
-      github.event.label.name == 'agent:codex' ||
-      github.event_name == 'workflow_dispatch'
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'issues' && github.event.label.name == 'agent:codex')
     runs-on: ubuntu-latest
     permissions:
       issues: write

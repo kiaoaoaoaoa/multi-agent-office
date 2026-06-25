@@ -9,6 +9,8 @@ on:
 
 jobs:
   scan-and-assign:
+    if: |
+      github.event_name != 'push'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -65,7 +67,7 @@ jobs:
 
       - name: 📊 Update shared state
         run: |
-          cat > agents/state.json << 'STATEEOF'
+          cat > agents/state.json << STATEEOF
           {
             "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
             "orchestrator": "active",
