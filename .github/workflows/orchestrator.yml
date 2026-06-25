@@ -1,16 +1,15 @@
-name: 🎯 Orchestrator
+name: Orchestrator
 
 on:
   schedule:
-    - cron: '*/5 * * * *'  # 매 5분마다 스캔
+    - cron: '*/5 * * * *'
   issues:
     types: [opened, labeled, unlabeled, edited]
-  workflow_dispatch:  # 수동 실행도 가능
+  workflow_dispatch:
 
 jobs:
   scan-and-assign:
-    if: |
-      github.event_name != 'push'
+    if: github.event_name != 'push'
     runs-on: ubuntu-latest
     permissions:
       issues: write
@@ -19,57 +18,58 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 📋 Scan all open issues
-        id: scan
-        run: |
-          echo "=== 현재 작업 현황 ==="
-          gh issue list --state open --json number,title,labels,assignees,updatedAt \
-            | jq -r '.[] | "  #\(.number) [\(.labels[].name // "no-label")] \(.title)"'
+      - name: Scan open issues
         env:
           GH_TOKEN: ${{ github.token }}
+        run: |
+          echo "=== Current tasks ==="
+          gh issue list --state open --json number,title,labels,assignees,updatedAt \
+            | jq -r '.[] | "  #\(.number) [\(.labels[].name // "no-label")] \(.title)"'
 
-      - name: 🔍 Find unassigned tasks
+      - name: Find unassigned tasks
         id: unassigned
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           UNASSIGNED=$(gh issue list --state open --json number,title,labels \
             --jq '[.[] | select(.assignees | length == 0)]')
-
           echo "unassigned_count=$(echo "$UNASSIGNED" | jq 'length')" >> $GITHUB_OUTPUT
-
           if [ "$(echo "$UNASSIGNED" | jq 'length')" -gt 0 ]; then
-            echo "⚠️  미할당 작업 발견:"
+            echo "Unassigned tasks found:"
             echo "$UNASSIGNED" | jq -r '.[] | "  #\(.number) \(.title)"'
           fi
+
+      - name: Auto-assign by label
+        if: steps.unassigned.outputs.unassigned_count != '0'
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: 🤖 Auto-assign by label
-        if: steps.unassigned.outputs.unassigned_count != '0'
         run: |
           gh issue list --state open --json number,labels --jq '
             .[] | select(.labels | any(.name; startswith("agent:"))) |
             "#\(.number):\(.labels | map(select(.name | startswith("agent:"))) | .[0].name)"
-          ' | while IFS=: read -r number agent; do
+          ' > /tmp/agent_map.txt
+
+          while IFS=: read -r number agent; do
             case "$agent" in
               "agent:claude")   ASSIGNEE="anthropic-claude" ;;
               "agent:gemini")   ASSIGNEE="google-gemini" ;;
               "agent:codex")    ASSIGNEE="openai-codex" ;;
               *)                ASSIGNEE="" ;;
             esac
-
             if [ -n "$ASSIGNEE" ]; then
               gh issue edit "$number" --add-assignee "$ASSIGNEE" 2>/dev/null || true
-              echo "  → #$number 할당됨: $agent ($ASSIGNEE)"
+              echo "  Assigned #$number -> $agent ($ASSIGNEE)"
             fi
-          done
+          done < /tmp/agent_map.txt
+
+      - name: Update shared state
         env:
           GH_TOKEN: ${{ github.token }}
-
-      - name: 📊 Update shared state
         run: |
+          NOW=$(date -u +%Y-%m-%dT%H:%M:%SZ)
           cat > agents/state.json << STATEEOF
           {
-            "updated_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "updated_at": "${NOW}",
             "orchestrator": "active",
             "agents": {
               "claude": { "status": "idle", "current_task": null },
@@ -79,17 +79,15 @@ jobs:
           }
           STATEEOF
 
-          # 실시간 Issue 상태 반영
           ACTIVE_TASKS=$(gh issue list --state open --json number,title,labels,assignees \
             --jq '[.[] | {number, title, labels: [.labels[].name], assignees: [.assignees[].login]}]')
 
           echo "$ACTIVE_TASKS" | jq . > tasks/active.json
 
-          # agent 상태 업데이트
           for agent in claude gemini codex; do
             TASK=$(echo "$ACTIVE_TASKS" | jq -r --arg a "$agent" \
               '[.[] | select(.labels | any(. == "agent:\($a)"))][0]')
-            if [ "$TASK" != "null" ] && [ "$TASK" != "" ]; then
+            if [ "$TASK" != "null" ] && [ -n "$TASK" ]; then
               TASK_NUM=$(echo "$TASK" | jq -r '.number')
               TMP_FILE=$(mktemp)
               jq --arg a "$agent" --arg t "$TASK_NUM" \
@@ -98,39 +96,37 @@ jobs:
               mv "$TMP_FILE" agents/state.json
             fi
           done
-        env:
-          GH_TOKEN: ${{ github.token }}
 
-      - name: 💾 Commit state changes
+      - name: Commit state changes
         run: |
           git config user.name "orchestrator[bot]"
           git config user.email "orchestrator@agents.local"
           git add agents/state.json tasks/active.json 2>/dev/null || true
           if git diff --staged --quiet; then
-            echo "No state changes to commit"
+            echo "No state changes"
           else
-            git commit -m "📊 orchestrator: 상태 동기화 ($(date +%H:%M))"
+            git commit -m "orchestrator: state sync ($(date +%H:%M))"
             git pull --rebase origin main 2>/dev/null || true
             git push origin main
           fi
 
-      - name: 🗣️ Cross-agent notifications
+      - name: Cross-agent notifications
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          # 의존성 체크: agent:gemini 작업 완료 → agent:claude에 알림
           COMPLETED=$(gh issue list --state closed --label "agent:gemini" \
             --json number,title --jq '.[] | "#\(.number) \(.title)"' --limit 5)
 
           if [ -n "$COMPLETED" ]; then
             CLAUDE_TASKS=$(gh issue list --state open --label "agent:claude" \
               --json number --jq '.[].number')
-
             for num in $CLAUDE_TASKS; do
               BODY=$(gh issue view "$num" --json body --jq '.body')
               if echo "$BODY" | grep -q "depends-on:.*gemini"; then
-                gh issue comment "$num" --body "🔔 @anthropic-claude: Gemini 작업 완료됨. 시작 가능합니다.
-        $COMPLETED"
+                echo "Gemini tasks completed. Ready to proceed." > /tmp/notif_body
+                echo "" >> /tmp/notif_body
+                echo "$COMPLETED" >> /tmp/notif_body
+                gh issue comment "$num" --body-file /tmp/notif_body
               fi
             done
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
