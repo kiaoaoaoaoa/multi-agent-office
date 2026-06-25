@@ -1,0 +1,29 @@
+{
+  "updated_at": "2026-06-25T00:00:00Z",
+  "orchestrator": "active",
+  "agents": {
+    "claude": {
+      "status": "idle",
+      "role": "서류 담당 부서",
+      "current_task": null,
+      "completed_tasks": [],
+      "depends_on": []
+    },
+    "gemini": {
+      "status": "idle",
+      "role": "대외 커뮤니케이션 부서",
+      "current_task": null,
+      "completed_tasks": [],
+      "depends_on": []
+    },
+    "codex": {
+      "status": "idle",
+      "role": "정보수집/리서치 부서",
+      "current_task": null,
+      "completed_tasks": [],
+      "depends_on": []
+    }
+  },
+  "blockers": [],
+  "notifications": []
+}

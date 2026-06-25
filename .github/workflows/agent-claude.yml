@@ -1,0 +1,142 @@
+name: 🤖 Agent Claude
+
+on:
+  issues:
+    types: [labeled]
+  workflow_dispatch:
+    inputs:
+      task_number:
+        description: '처리할 Issue 번호'
+        required: true
+      prompt_override:
+        description: '직접 프롬프트 입력'
+        required: false
+
+jobs:
+  claude-worker:
+    if: |
+      github.event.label.name == 'agent:claude' ||
+      github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 📖 Read task
+        id: task
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ISSUE_NUM="${{ inputs.task_number }}"
+          else
+            ISSUE_NUM="${{ github.event.issue.number }}"
+          fi
+          echo "issue_number=$ISSUE_NUM" >> $GITHUB_OUTPUT
+
+          TITLE=$(gh issue view "$ISSUE_NUM" --json title --jq '.title')
+          BODY=$(gh issue view "$ISSUE_NUM" --json body --jq '.body')
+          echo "title=$TITLE" >> $GITHUB_OUTPUT
+          echo "body<<BODYEOF" >> $GITHUB_OUTPUT
+          echo "$BODY" >> $GITHUB_OUTPUT
+          echo "BODYEOF" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: 📥 Load context
+        id: context
+        run: |
+          echo "=== 현재 shared_state.json ==="
+          if [ -f agents/state.json ]; then
+            cat agents/state.json | jq .
+          fi
+
+          echo "=== 다른 에이전트 최근 결과 ==="
+          ls -la agents/results/ 2>/dev/null || echo "  (아직 결과 없음)"
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: 🧠 Execute Claude (Anthropic API)
+        id: claude
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -z "$ANTHROPIC_API_KEY" ]; then
+            echo "⚠️  ANTHROPIC_API_KEY가 설정되지 않았습니다."
+            echo "GitHub Secrets에 ANTHROPIC_API_KEY를 등록해주세요."
+            exit 0
+          fi
+
+          PROMPT=$(cat << 'PROMPTEOF'
+          당신은 "서류 담당 부서"의 AI 에이전트입니다.
+          역할: 계약서, 보고서, 공문 등 모든 문서 작업을 처리합니다.
+
+          현재 공유 상태:
+          PROMPTEOF
+          )
+          STATE=$(cat agents/state.json 2>/dev/null || echo "{}")
+          PROMPT="$PROMPT $STATE"
+
+          PROMPT="$PROMPT
+
+          당신의 작업:
+          ${{ steps.task.outputs.body }}
+
+          응답은 JSON 형식으로:
+          {
+            \"action\": \"completed|blocked|need_info\",
+            \"result\": \"작업 결과 요약\",
+            \"output_file\": \"agents/results/claude-YYYYMMDD-HHMM.md\",
+            \"depends_on\": [\"agent:gemini\"],
+            \"next_steps\": \"다음 행동\"
+          }
+          "
+
+          # Anthropic Claude API 호출
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "content-type: application/json" \
+            -d "$(jq -n --arg prompt "$PROMPT" '{
+              model: "claude-sonnet-4-20250514",
+              max_tokens: 4096,
+              messages: [{role: "user", content: $prompt}]
+            }')")
+
+          echo "$RESPONSE" | jq '.content[0].text' -r > /tmp/claude_output.txt
+          cat /tmp/claude_output.txt
+        continue-on-error: true
+
+      - name: 💾 Save result
+        run: |
+          ISSUE_NUM="${{ steps.task.outputs.issue_number }}"
+          RESULT_FILE="agents/results/claude-$(date +%Y%m%d-%H%M)-task${ISSUE_NUM}.md"
+
+          mkdir -p agents/results
+          echo "# 작업 #${ISSUE_NUM}: ${{ steps.task.outputs.title }}" > "$RESULT_FILE"
+          echo "" >> "$RESULT_FILE"
+          echo "**처리 시각:** $(date -Iseconds)" >> "$RESULT_FILE"
+          echo "" >> "$RESULT_FILE"
+          echo "## 결과" >> "$RESULT_FILE"
+          cat /tmp/claude_output.txt >> "$RESULT_FILE" 2>/dev/null || echo "_API 호출 실패 또는 키 미설정_" >> "$RESULT_FILE"
+
+          git config user.name "claude[bot]"
+          git config user.email "claude@agents.local"
+          git add "$RESULT_FILE"
+          git commit -m "📄 Claude: 작업 #${ISSUE_NUM} 완료"
+          git pull --rebase origin main 2>/dev/null || true
+          git push origin main
+
+      - name: 💬 Report back
+        run: |
+          gh issue comment "${{ steps.task.outputs.issue_number }}" \
+            --body "$(cat << 'EOF'
+        ## ✅ Claude 작업 완료
+
+        $(cat /tmp/claude_output.txt 2>/dev/null || echo "처리 결과가 없습니다.")
+
+        📁 결과 파일: `agents/results/claude-$(date +%Y%m%d-%H%M)-task${{ steps.task.outputs.issue_number }}.md`
+        EOF
+        )"
+        env:
+          GH_TOKEN: ${{ github.token }}
